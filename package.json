@@ -1,0 +1,29 @@
+{
+  "name": "wpmonitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-user WordPress monitoring dashboard on Cloudflare Workers free tier",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:scheduled": "wrangler dev --test-scheduled",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:init": "wrangler d1 execute wpmonitor --local --file=migrations/0001_initial.sql",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.44.2",
+    "hono": "^4.8.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.1",
+    "@types/node": "^24.0.0",
+    "miniflare": "^4.20250823.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.20.0"
+  }
+}

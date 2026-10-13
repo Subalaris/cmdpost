@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "wpmonitor",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "wpmonitor",
+      "database_id": "REPLACE_WITH_YOUR_D1_ID"
+    }
+  ],
+  // 3 cron triggers (the free plan allows 5 per account).
+  // Dispatched in src/index.ts `scheduled` on event.cron:
+  //   */5  → uptime checks (≤25 sites, milestone 3)
+  //   0 *  → PageSpeed (≤5) + WP fingerprint slice (≤2) (milestones 5–6)
+  //   0 3  → daily: cache refresh, aggregation, pruning (milestone 8)
+  "triggers": {
+    "crons": ["*/5 * * * *", "0 * * * *", "0 3 * * *"]
+  },
+  "vars": {
+    "SIGNUP_MODE": "approval",
+    "ADMIN_EMAIL": "admin@example.com",
+    "MAX_USERS": "50",
+    "MAX_SITES_PER_USER": "5",
+    "MAX_SITES_TOTAL": "150"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

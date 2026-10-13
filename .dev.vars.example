@@ -1,0 +1,42 @@
+# ------------------------------------------------------------------
+# WPMonitor development variables (copy to .dev.vars — never commit .dev.vars)
+# `wrangler dev` reads .dev.vars automatically.
+# ------------------------------------------------------------------
+
+# --- Email (Resend) -------------------------------------------------
+# Leave EMPTY in local dev: emails (incl. magic-link URLs) are printed to the console.
+RESEND_API_KEY=
+
+# --- Turnstile (Cloudflare) -----------------------------------------
+# Site key is public (rendered by the login page widget); secret verifies on the server.
+TURNSTILE_SITE_KEY=
+TURNSTILE_SECRET_KEY=
+
+# --- Accounts --------------------------------------------------------
+# The user with this email is auto-approved and gets is_admin.
+ADMIN_EMAIL=admin@example.com
+# open | approval | closed   (default: approval)
+SIGNUP_MODE=approval
+MAX_USERS=50
+MAX_SITES_PER_USER=5
+MAX_SITES_TOTAL=150
+
+# --- Base URL (used to build magic links) ----------------------------
+# Optional in local dev (falls back to the request host).
+# APP_BASE_URL=https://your-worker.workers.dev
+
+# --- Monitoring (optional in local dev) ------------------------------
+# Empty -> PageSpeed job is skipped, dashboard shows "n/a".
+PAGESPEED_API_KEY=
+
+# --- SSL ingest (external checker, milestone 7) ----------------------
+# Long random string shared with the GitHub Actions job.
+INGEST_TOKEN=
+
+# --- Google sign-in (milestone 8; optional) --------------------------
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# --- DANGEROUS: local development only --------------------------------
+# Skips Turnstile verification. MUST NOT be set in production.
+# DEV_MODE=true
