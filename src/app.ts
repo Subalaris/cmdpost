@@ -5,6 +5,7 @@ import { publicRoutes } from './routes/public';
 import { settingsRoutes } from './routes/settings';
 import { adminRoutes } from './routes/admin';
 import { dashboardRoutes } from './routes/dashboard';
+import { sitesRoutes } from './routes/sites';
 import { sessionMiddleware, requireApproved, requireAdmin } from './middleware/session';
 import { loadConfig, warnDevMode } from './env';
 import type { Env } from './env';
@@ -47,7 +48,7 @@ export function buildApp(env: Env) {
   approved('/settings/*');
 
   app.route('/', dashboardRoutes());
-  app.get('/sites', (c) => c.redirect('/dashboard', 302));
+  app.route('/', sitesRoutes());
   app.route('/', settingsRoutes());
 
   const admin = (p: string) => app.use(p, sessionMiddleware(env), requireAdmin);

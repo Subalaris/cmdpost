@@ -1,17 +1,18 @@
 import { Hono } from 'hono';
 import { makeDb } from '../db/client';
-import { countSitesForUser, listSitesForUser } from '../db/repos/sites';
+import { listSitesForUser } from '../db/repos/sites';
 import { layout, esc } from '../views/layout';
 import type { Env } from '../env';
 import type { UserRow } from '../db/repos/users';
 
-function user(c: any): UserRow {
+function user(c: { get(k: string): unknown }): UserRow {
   return c.get('user') as UserRow;
 }
 
 /**
- * Dashboard (Milestone 1 = minimal; Milestone 2-3 add the full table,
- * sorting, filtering, pagination, and htmx auto-refresh).
+ * Dashboard. Milestone 3 adds server-side sorting/filtering/pagination and
+ * the htmx 30s auto-refresh; PageSpeed/Load/Security columns fill in with
+ * milestones 3–7.
  */
 export function dashboardRoutes() {
   const app = new Hono<{ Bindings: Env }>();
@@ -33,7 +34,7 @@ export function dashboardRoutes() {
         })();
         return `<tr>
   <td><a href="/sites/${s.id}">${esc(s.name)}</a><div class="muted small">${esc(domain)}</div></td>
-  <td>${s.verifiedAt ? `<span class="badge ${s.currentStatus}">${s.currentStatus}</span>` : '<span class="badge unknown">unverified</span>'}</td>
+  <td>${s.verifiedAt ? `<span class="badge ${s.currentStatus}">${s.currentStatus}</span>` : '<a class="badge unknown" href="/sites/' + s.id + '">unverified</a>'}</td>
   <td class="muted">—</td>
   <td class="muted">—</td>
   <td class="muted">—</td>
@@ -47,10 +48,9 @@ export function dashboardRoutes() {
       active: 'dashboard',
       content: `
 <h1>You are currently monitoring ${n} website${n === 1 ? '' : 's'}</h1>
-<p class="muted">Milestone 1 preview — full status, PageSpeed, security, and WordPress-update columns arrive in milestones 2–3.</p>
 <div class="toolbar">
   <a class="btn primary" href="/sites">Manage sites</a>
-  ${n === 0 ? '<span class="muted">Add your first site to start monitoring.</span>' : ''}
+  ${n === 0 ? '<span class="muted">Add your first site to start monitoring.</span>' : '<span class="muted">Unverified sites are not monitored until you prove ownership.</span>'}
 </div>
 <section class="card">
   <table class="table" id="site-table">
