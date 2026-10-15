@@ -176,7 +176,7 @@ ${flash}${err}
   <ol>
     <li><strong>DNS</strong> — add a TXT record at <code>_wpmonitor.${esc(domainOf(s.url))}</code> with value <code>${esc(s.verificationToken ?? '')}</code></li>
     <li><strong>Meta tag</strong> — add <code>&lt;meta name="wpmonitor-verification" content="${esc(s.verificationToken ?? '')}"&gt;</code> to your homepage <code>&lt;head&gt;</code></li>
-    <li><strong>File</strong> — serve a file at <code>/wpmonitor-${esc(s.verificationToken ?? '')}.txt</code> containing exactly the token</li>
+    <li><strong>File</strong> — serve a file at <code>/wpmonitor-${esc(s.verificationToken ?? '')}.txt</code> containing exactly the token — <a href="/sites/${s.id}/verification.txt">download the file</a></li>
   </ol>
   <form method="POST" action="/sites/${s.id}/verify" class="inline-form">
     <button class="btn primary" type="submit">Check now</button>
@@ -253,6 +253,23 @@ ${verifySection}
     const deleted = await deleteSiteForUser(makeDb(c.env), u.id, id);
     if (!deleted) return c.notFound();
     return c.redirect('/sites', 302);
+  });
+
+  // ------------------------------------------------- verification file download
+  app.get('/sites/:id/verification.txt', async (c) => {
+    const u = user(c);
+    const id = parseSiteId(c.req.param('id'));
+    if (!id) return c.notFound();
+    const db = makeDb(c.env);
+    const s = await findSiteForUser(db, u.id, id);
+    if (!s?.verificationToken) return c.notFound();
+    return new Response(s.verificationToken + '\n', {
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'content-disposition': `attachment; filename="wpmonitor-${s.verificationToken}.txt"`,
+        'cache-control': 'no-store',
+      },
+    });
   });
 
   // ------------------------------------------------------------- verify
