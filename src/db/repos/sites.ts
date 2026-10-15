@@ -1,6 +1,6 @@
 import { eq, and, asc, count, or, isNull, isNotNull, sql } from 'drizzle-orm';
 import type { Db } from '../client';
-import { sites, blockedDomains, users } from '../schema';
+import { sites, blockedDomains, users, checks } from '../schema';
 import { nowIso } from '../client';
 
 export type SiteRow = typeof sites.$inferSelect;
@@ -178,12 +178,20 @@ export interface JobSite {
   id: number;
   url: string;
   ownerId: number;
+  currentStatus: 'up' | 'down' | 'unknown';
+  consecutiveFailures: number;
 }
 
 export async function selectUptimeBatch(db: Db, limit: number, minIntervalMs: number): Promise<JobSite[]> {
   const cutoff = new Date(Date.now() - minIntervalMs).toISOString();
   const res = await db
-    .select({ id: sites.id, url: sites.url, ownerId: sites.ownerId })
+    .select({
+      id: sites.id,
+      url: sites.url,
+      ownerId: sites.ownerId,
+      currentStatus: sites.currentStatus,
+      consecutiveFailures: sites.consecutiveFailures,
+    })
     .from(sites)
     .innerJoin(users, eq(sites.ownerId, users.id))
     .where(
@@ -198,4 +206,117 @@ export async function selectUptimeBatch(db: Db, limit: number, minIntervalMs: nu
     .limit(limit)
     .all();
   return res as JobSite[];
+}
+
+/**
+ * Persist one uptime slice in a SINGLE D1 round trip: one checks INSERT and
+ * one sites UPDATE per checked site.
+ */
+export interface CheckWrite {
+  siteId: number;
+  checkedAt: string;
+  ok: boolean;
+  statusCode: number | null;
+  responseMs: number | null;
+  error: string | null;
+  siteUpdate: {
+    lastCheckedAt: string;
+    lastResponseMs: number | null;
+    currentStatus: 'up' | 'down' | 'unknown';
+    consecutiveFailures: number;
+    statusChangedAt?: string;
+  };
+}
+
+export async function writeCheckResults(db: Db, results: CheckWrite[]): Promise<void> {
+  if (results.length === 0) return;
+  const stmts = results.flatMap((r) => [
+    db.insert(checks).values({
+      siteId: r.siteId,
+      checkedAt: r.checkedAt,
+      ok: r.ok,
+      statusCode: r.statusCode,
+      responseMs: r.responseMs,
+      error: r.error,
+    }),
+    db.update(sites).set(r.siteUpdate).where(eq(sites.id, r.siteId)),
+  ]);
+  await db.batch(stmts as unknown as Parameters<typeof db.batch>[0]);
+}
+
+// ------------------------------------------------------------- dashboard
+
+export type SiteFilter = 'all' | 'down' | 'updates' | 'ssl';
+export type SiteSort = 'name' | 'status' | 'pagespeed' | 'load' | 'updates';
+
+export interface DashboardRow {
+  id: number;
+  name: string;
+  url: string;
+  currentStatus: 'up' | 'down' | 'unknown';
+  verifiedAt: string | null;
+  pagespeedScore: number | null;
+  lastResponseMs: number | null;
+  sslProblems: number;
+  updatesCount: number | null; // null = not scanned yet → UI shows "?"
+}
+
+export interface DashboardPage {
+  rows: DashboardRow[];
+  total: number;
+}
+
+const STATUS_RANK = sql`CASE ${sites.currentStatus} WHEN 'down' THEN 0 WHEN 'unknown' THEN 1 ELSE 2 END`;
+// NOTE: correlated subqueries reference the outer table as a literal
+// `sites.id`, NOT `${sites.id}` — drizzle renders an embedded column in a raw
+// sql fragment as a bare `"id"`, which does NOT correlate to the outer row.
+const LATEST_PS = sql`(SELECT pr.performance_score FROM pagespeed_results pr WHERE pr.site_id = sites.id ORDER BY pr.checked_at DESC LIMIT 1)`;
+const SSL_PROBLEMS = sql`(SELECT CASE WHEN ss.state IS NULL OR ss.state = 'ok' THEN 0 ELSE 1 END FROM ssl_status ss WHERE ss.site_id = sites.id ORDER BY ss.checked_at DESC LIMIT 1)`;
+const UPDATES_COUNT = sql`(SELECT COUNT(*) FROM site_components sc WHERE sc.site_id = sites.id AND sc.outdated = 1)`;
+const HAS_FINGERPRINT = sql`EXISTS (SELECT 1 FROM wp_fingerprints wf WHERE wf.site_id = sites.id)`;
+
+/**
+ * Server-side sort/filter/search/pagination for the dashboard table.
+ * ISOLATION: userId is mandatory and always in the WHERE clause.
+ */
+export async function querySitesForUser(
+  db: Db,
+  userId: number,
+  opts: { sort: SiteSort; filter: SiteFilter; search: string; page: number; perPage: number },
+): Promise<DashboardPage> {
+  const conds = [eq(sites.ownerId, userId)];
+  if (opts.search) conds.push(sql`(${sites.name} LIKE ${'%' + opts.search + '%'} OR ${sites.url} LIKE ${'%' + opts.search + '%'})`);
+  if (opts.filter === 'down') conds.push(eq(sites.currentStatus, 'down'));
+  if (opts.filter === 'updates') conds.push(sql`${UPDATES_COUNT} > 0`);
+  if (opts.filter === 'ssl') conds.push(sql`${SSL_PROBLEMS} > 0`);
+  const where = and(...conds);
+
+  const orderBy =
+    opts.sort === 'status' ? [sql`${STATUS_RANK} ASC`, asc(sites.name)] :
+    opts.sort === 'pagespeed' ? [sql`${LATEST_PS} IS NULL ASC`, sql`${LATEST_PS} ASC`] :
+    opts.sort === 'load' ? [sql`${sites.lastResponseMs} IS NULL ASC`, asc(sites.lastResponseMs)] :
+    opts.sort === 'updates' ? [sql`${HAS_FINGERPRINT} DESC`, sql`${UPDATES_COUNT} DESC`] :
+    [asc(sites.name)];
+
+  const totalRow = await db.select({ n: count() }).from(sites).where(where).get();
+  const rows = await db
+    .select({
+      id: sites.id,
+      name: sites.name,
+      url: sites.url,
+      currentStatus: sites.currentStatus,
+      verifiedAt: sites.verifiedAt,
+      pagespeedScore: LATEST_PS.as('pagespeedScore'),
+      lastResponseMs: sites.lastResponseMs,
+      sslProblems: SSL_PROBLEMS.as('sslProblems'),
+      updatesCount: sql`CASE WHEN ${HAS_FINGERPRINT} THEN ${UPDATES_COUNT} ELSE NULL END`.as('updatesCount'),
+    })
+    .from(sites)
+    .where(where)
+    .orderBy(...orderBy)
+    .limit(opts.perPage)
+    .offset((opts.page - 1) * opts.perPage)
+    .all();
+
+  return { rows: rows as unknown as DashboardRow[], total: totalRow?.n ?? 0 };
 }

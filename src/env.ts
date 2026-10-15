@@ -18,6 +18,9 @@ export interface Env {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   DEV_MODE?: string;
+  RUN_JOBS_IN_DEV?: string;
+  UPTIME_BATCH?: string;
+  UPTIME_MIN_INTERVAL_MS?: string;
 }
 
 export interface Config {

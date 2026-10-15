@@ -6,8 +6,14 @@ export function esc(s: string): string {
 }
 
 /** Shared HTML shell (header nav + footer with abuse contact). */
-export function layout(c: Context, opts: { title: string; content: string; user?: UserRow; active?: string }): Response {
+export function layout(
+  c: Context,
+  opts: { title: string; content: string; user?: UserRow; active?: string; htmx?: boolean },
+): Response {
   const { title, content, user, active } = opts;
+  const htmxTag = opts.htmx
+    ? '<script src="https://unpkg.com/htmx.org@1.9.12" defer></script>'
+    : '';
   const nav = user
     ? `<nav class="nav">
         <a href="/dashboard" class="${active === 'dashboard' ? 'active' : ''}">Dashboard</a>
@@ -24,6 +30,7 @@ export function layout(c: Context, opts: { title: string; content: string; user?
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} — WPMonitor</title>
 <link rel="stylesheet" href="/styles.css">
+${htmxTag}
 </head>
 <body>
 <header class="topbar">
