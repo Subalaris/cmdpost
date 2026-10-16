@@ -1,6 +1,6 @@
 import { eq, and, asc, count, or, isNull, isNotNull, sql } from 'drizzle-orm';
 import type { Db } from '../client';
-import { sites, blockedDomains, users, checks } from '../schema';
+import { sites, blockedDomains, users, checks, pagespeedResults } from '../schema';
 import { nowIso } from '../client';
 
 export type SiteRow = typeof sites.$inferSelect;
@@ -245,6 +245,41 @@ export async function writeCheckResults(db: Db, results: CheckWrite[]): Promise<
     }),
     db.update(sites).set(r.siteUpdate).where(eq(sites.id, r.siteId)),
   ]);
+  await db.batch(stmts as unknown as Parameters<typeof db.batch>[0]);
+}
+
+// ------------------------------------------------------------- pagespeed
+
+/**
+ * INTERNAL (pagespeed job): eligible sites ordered by their LEAST RECENT
+ * PageSpeed test across all users (never tested → first). Fair across users.
+ */
+export async function selectPageSpeedBatch(db: Db, limit: number): Promise<JobSite[]> {
+  const lastPs = sql`(SELECT MAX(pr.checked_at) FROM pagespeed_results pr WHERE pr.site_id = sites.id)`;
+  const res = await db
+    .select({
+      id: sites.id,
+      url: sites.url,
+      name: sites.name,
+      ownerId: sites.ownerId,
+      currentStatus: sites.currentStatus,
+      consecutiveFailures: sites.consecutiveFailures,
+      statusChangedAt: sites.statusChangedAt,
+    })
+    .from(sites)
+    .innerJoin(users, eq(sites.ownerId, users.id))
+    .where(and(eq(users.status, 'approved'), isNotNull(sites.verifiedAt), eq(sites.active, true)))
+    .orderBy(sql`${lastPs} IS NULL DESC`, sql`${lastPs} ASC`, asc(sites.id))
+    .limit(limit)
+    .all();
+  return res as JobSite[];
+}
+
+export async function writePageSpeedResults(db: Db, results: Array<{ siteId: number; score: number }>, checkedAt: string): Promise<void> {
+  if (results.length === 0) return;
+  const stmts = results.map((r) =>
+    db.insert(pagespeedResults).values({ siteId: r.siteId, checkedAt, performanceScore: r.score, strategy: 'mobile' }),
+  );
   await db.batch(stmts as unknown as Parameters<typeof db.batch>[0]);
 }
 

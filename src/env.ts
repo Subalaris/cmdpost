@@ -21,6 +21,7 @@ export interface Env {
   RUN_JOBS_IN_DEV?: string;
   UPTIME_BATCH?: string;
   UPTIME_MIN_INTERVAL_MS?: string;
+  PAGESPEED_BATCH?: string;
 }
 
 export interface Config {
