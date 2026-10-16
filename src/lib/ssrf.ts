@@ -74,6 +74,8 @@ export interface FetchPublicOptions {
   timeoutMs?: number;
   maxBytes?: number;
   headers?: Record<string, string>;
+  /** Optional subrequest budget (Workers 50/invocation cap); each hop consumes one. */
+  budget?: { take(): boolean };
 }
 
 export interface FetchPublicResult {
@@ -122,6 +124,7 @@ export async function fetchPublic(rawUrl: string, opts: FetchPublicOptions = {})
   for (let hop = 0; hop <= 3; hop++) {
     const v = validatePublicUrl(current);
     if (!v.ok) return { ok: false, status: 0, error: `ssrf:${v.reason}` };
+    if (opts.budget && !opts.budget.take()) return { ok: false, status: 0, error: 'budget' };
 
     const res = await fetchWithTimeout(
       v.url.toString(),

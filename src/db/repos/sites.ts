@@ -283,6 +283,103 @@ export async function writePageSpeedResults(db: Db, results: Array<{ siteId: num
   await db.batch(stmts as unknown as Parameters<typeof db.batch>[0]);
 }
 
+// ------------------------------------------------------------- fingerprint
+
+/**
+ * INTERNAL (fingerprint job): eligible sites ordered by LEAST RECENT scan
+ * across all users (never scanned → first).
+ */
+export async function selectFingerprintBatch(db: Db, limit: number): Promise<JobSite[]> {
+  const res = await db
+    .select({
+      id: sites.id,
+      url: sites.url,
+      name: sites.name,
+      ownerId: sites.ownerId,
+      currentStatus: sites.currentStatus,
+      consecutiveFailures: sites.consecutiveFailures,
+      statusChangedAt: sites.statusChangedAt,
+    })
+    .from(sites)
+    .innerJoin(users, eq(sites.ownerId, users.id))
+    .where(and(eq(users.status, 'approved'), isNotNull(sites.verifiedAt), eq(sites.active, true)))
+    .orderBy(sql`COALESCE(${sites.lastScannedAt}, '1970-01-01T00:00:00.000Z') ASC`)
+    .limit(limit)
+    .all();
+  return res as JobSite[];
+}
+
+// ------------------------------------------------------------- detail page
+
+import { checks as checksT, pagespeedResults as psT, sslStatus as sslT, wpFingerprints as fpT, siteComponents as compT } from '../schema';
+
+export interface CheckRow {
+  checkedAt: string;
+  ok: boolean;
+  statusCode: number | null;
+  responseMs: number | null;
+  error: string | null;
+}
+
+/** ISOLATION: siteId must belong to userId (checked by the route via findSiteForUser). */
+export async function listRecentChecks(db: Db, siteId: number, limit: number, sinceIso?: string): Promise<CheckRow[]> {
+  const conds = [eq(checksT.siteId, siteId)];
+  if (sinceIso) conds.push(sql`${checksT.checkedAt} >= ${sinceIso}`);
+  return await db
+    .select({ checkedAt: checksT.checkedAt, ok: checksT.ok, statusCode: checksT.statusCode, responseMs: checksT.responseMs, error: checksT.error })
+    .from(checksT)
+    .where(and(...conds))
+    .orderBy(sql`${checksT.checkedAt} DESC`)
+    .limit(limit)
+    .all();
+}
+
+export async function uptimePct(db: Db, siteId: number, sinceIso: string): Promise<number | null> {
+  const row = await db
+    .select({
+      total: count(),
+      okCount: sql<number>`SUM(CASE WHEN ${checksT.ok} THEN 1 ELSE 0 END)`,
+    })
+    .from(checksT)
+    .where(and(eq(checksT.siteId, siteId), sql`${checksT.checkedAt} >= ${sinceIso}`))
+    .get();
+  if (!row || row.total === 0) return null;
+  return Math.round(((row.okCount ?? 0) / row.total) * 1000) / 10;
+}
+
+export async function listPageSpeedHistory(db: Db, siteId: number, limit = 30): Promise<Array<{ checkedAt: string; score: number | null }>> {
+  return await db
+    .select({ checkedAt: psT.checkedAt, score: psT.performanceScore })
+    .from(psT)
+    .where(eq(psT.siteId, siteId))
+    .orderBy(sql`${psT.checkedAt} DESC`)
+    .limit(limit)
+    .all();
+}
+
+export async function latestSsl(db: Db, siteId: number) {
+  return await db
+    .select({ checkedAt: sslT.checkedAt, validTo: sslT.validTo, daysLeft: sslT.daysLeft, issuer: sslT.issuer, state: sslT.state })
+    .from(sslT)
+    .where(eq(sslT.siteId, siteId))
+    .orderBy(sql`${sslT.checkedAt} DESC`)
+    .limit(1)
+    .get();
+}
+
+export async function latestFingerprint(db: Db, siteId: number) {
+  return await db.select().from(fpT).where(eq(fpT.siteId, siteId)).get();
+}
+
+export async function listComponents(db: Db, siteId: number) {
+  return await db
+    .select()
+    .from(compT)
+    .where(eq(compT.siteId, siteId))
+    .orderBy(sql`CASE ${compT.outdated} WHEN 1 THEN 0 ELSE 1 END ASC`, asc(compT.type), asc(compT.slug))
+    .all();
+}
+
 // ------------------------------------------------------------- dashboard
 
 export type SiteFilter = 'all' | 'down' | 'updates' | 'ssl';

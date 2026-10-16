@@ -1,6 +1,7 @@
 import { buildApp } from './app';
 import { runUptimeJob } from './jobs/uptime';
 import { runPageSpeedJob } from './jobs/pagespeed';
+import { runFingerprintJob } from './jobs/fingerprint';
 import { makeDb } from './db/client';
 import type { Env } from './env';
 
@@ -33,8 +34,7 @@ const handler = {
         await runUptimeJob(env, db);
       } else if (cron === '0 * * * *') {
         await runPageSpeedJob(env, db);
-        // WordPress fingerprint slice arrives in milestone 6.
-        console.log('[scheduled] hourly — fingerprint pending (milestone 6)');
+        await runFingerprintJob(env, db);
       } else {
         // daily 03:00 UTC: aggregation/pruning/cleanup (milestone 8)
         console.log('[scheduled] daily — aggregation/pruning pending (milestone 8)');

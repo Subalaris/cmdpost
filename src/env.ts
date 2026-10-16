@@ -22,6 +22,7 @@ export interface Env {
   UPTIME_BATCH?: string;
   UPTIME_MIN_INTERVAL_MS?: string;
   PAGESPEED_BATCH?: string;
+  FINGERPRINT_BATCH?: string;
 }
 
 export interface Config {

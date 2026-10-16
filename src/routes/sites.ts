@@ -7,7 +7,12 @@ import { clientIp, rateLimit } from '../middleware/rateLimit';
 import { rateLimitCheck } from '../db/repos/rateLimits';
 import { layout, esc } from '../views/layout';
 import { verifySite } from '../lib/verify-site';
-import { validatePublicUrl } from '../lib/ssrf';
+import { validatePublicUrl, fetchPublic } from '../lib/ssrf';
+import { sites } from '../db/schema';
+import { eq } from 'drizzle-orm';
+import { nowIso } from '../db/client';
+import { scanSite, writeScan } from '../jobs/fingerprint';
+import { makeBudget } from '../jobs/uptime';
 import {
   addSite,
   findSiteForUser,
@@ -18,6 +23,7 @@ import {
   markVerified,
   resetVerificationToken,
   normalizeUrl,
+  listRecentChecks, uptimePct, listPageSpeedHistory, latestSsl, latestFingerprint, listComponents,
   domainOf,
 } from '../db/repos/sites';
 import { loadConfig } from '../env';
@@ -148,28 +154,29 @@ ${flash}${err}
   );
 
   // ---------------------------------------------------------- detail page
-  app.get('/sites/:id', (c) => {
+  app.get('/sites/:id', async (c) => {
     const u = user(c);
     const id = parseSiteId(c.req.param('id'));
     if (!id) return c.notFound();
     const db = makeDb(c.env);
-    return (async () => {
-      const s = await findSiteForUser(db, u.id, id);
-      if (!s) return c.notFound(); // foreign site -> 404 (no probing)
+    const s = await findSiteForUser(db, u.id, id);
+    if (!s) return c.notFound(); // foreign site -> 404 (no probing)
 
-      const flash = c.req.query('verified') ? '<div class="flash ok">Ownership verified — monitoring will begin on the next job run.</div>' : '';
-      const err = c.req.query('err') ? `<div class="flash err">${esc(decodeURIComponent(c.req.query('err')!))}</div>` : '';
+    const flash = c.req.query('verified') ? '<div class="flash ok">Ownership verified — monitoring will begin on the next job run.</div>'
+      : c.req.query('scanned') ? '<div class="flash ok">Scan complete.</div>' : '';
+    const err = c.req.query('err') ? `<div class="flash err">${esc(decodeURIComponent(c.req.query('err')!))}</div>` : '';
 
-      const verifySection = s.verifiedAt
-        ? `<section class="card">
-  <h2>Ownership verified</h2>
-  <p>Verified via <strong>${esc(s.verificationMethod ?? '?')}</strong> on ${esc((s.verifiedAt ?? '').slice(0, 16).replace('T', ' '))} UTC.</p>
-  <form method="POST" action="/sites/${s.id}/verify/reset" class="inline-form"
-        onsubmit="return confirm('Reset verification? The site becomes unmonitored until re-verified.');">
-    <button class="btn danger" type="submit">Reset verification</button>
-  </form>
-</section>`
-        : `<section class="card">
+    // ---------- unverified: verification instructions only ----------
+    if (!s.verifiedAt) {
+      return layout(c, {
+        title: s.name,
+        user: u,
+        active: 'sites',
+        content: `
+${flash}${err}
+<h1>${esc(s.name)} <span class="badge unknown">unverified</span></h1>
+<p class="muted">${esc(s.url)} · added ${esc(s.createdAt.slice(0, 10))}</p>
+<section class="card">
   <h2>Verify you own this site</h2>
   <p class="muted">We will not send any requests to this site until you prove ownership. Use <strong>any one</strong> of these three methods, then click "Check now".</p>
   <p>Your token: <code>${esc(s.verificationToken ?? '')}</code></p>
@@ -181,28 +188,154 @@ ${flash}${err}
   <form method="POST" action="/sites/${s.id}/verify" class="inline-form">
     <button class="btn primary" type="submit">Check now</button>
   </form>
-</section>`;
+</section>
+<section class="card">
+  <h2>Settings</h2>
+  <form method="POST" action="/sites/${s.id}/edit" class="stack">
+    <label>Name <input name="name" value="${esc(s.name)}" maxlength="100"></label>
+    <label>Notes <textarea name="notes" rows="2" maxlength="2000">${esc(s.notes ?? '')}</textarea></label>
+    <div><button class="btn primary" type="submit">Save</button> <a class="btn" href="/sites">Back to list</a></div>
+  </form>
+</section>
+<section class="card danger-zone">
+  <h2>Danger zone</h2>
+  <form method="POST" action="/sites/${s.id}/delete" class="inline-form"
+        onsubmit="return confirm('Delete ${esc(s.name)} and all its history?');">
+    <button class="btn danger" type="submit">Delete site</button>
+  </form>
+</section>`,
+      });
+    }
 
-      return layout(c, {
-        title: s.name,
-        user: u,
-        active: 'sites',
-        content: `
+    // ---------- verified: full detail ----------
+    const day24 = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const day7 = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
+    const [checks24, checks7, uptime24, uptime7, psHistory, ssl, fp, comps] = await Promise.all([
+      listRecentChecks(db, s.id, 200, day24),
+      listRecentChecks(db, s.id, 2000, day7),
+      uptimePct(db, s.id, day24),
+      uptimePct(db, s.id, day7),
+      listPageSpeedHistory(db, s.id, 30),
+      latestSsl(db, s.id),
+      latestFingerprint(db, s.id),
+      listComponents(db, s.id),
+    ]);
+
+    const chartData24 = JSON.stringify(checks24.slice().reverse().map((r) => [Date.parse(r.checkedAt), r.responseMs ?? 0]));
+    const chartData7 = JSON.stringify(checks7.slice().reverse().map((r) => [Date.parse(r.checkedAt), r.responseMs ?? 0]));
+    const psData = JSON.stringify(psHistory.slice().reverse().map((r) => [Date.parse(r.checkedAt), r.score]));
+
+    const last20 = checks24.slice(0, 20)
+      .map((r) => `<tr>
+  <td class="muted small">${esc(r.checkedAt.slice(0, 19).replace('T', ' '))}</td>
+  <td>${r.ok ? '<span class="badge up">ok</span>' : '<span class="badge down">fail</span>'}</td>
+  <td>${r.statusCode ?? '—'}</td>
+  <td>${r.responseMs !== null ? (r.responseMs / 1000).toFixed(2) + ' s' : '—'}</td>
+  <td class="muted small">${esc(r.error ?? '')}</td>
+</tr>`)
+      .join('');
+
+    const sslCard = ssl
+      ? `<p>State: <span class="badge ${ssl.state === 'ok' ? 'up' : 'down'}">${esc(ssl.state)}</span>
+   · expires ${esc((ssl.validTo ?? '?').slice(0, 10))}
+   · <strong>${ssl.daysLeft ?? '?'} days left</strong>
+   ${ssl.issuer ? `· issuer ${esc(ssl.issuer)}` : ''}</p>
+<p class="muted small">Checked ${esc(ssl.checkedAt.slice(0, 16).replace('T', ' '))} UTC by the daily SSL checker.</p>`
+      : '<p class="muted">No SSL data yet — the daily certificate checker fills this in (milestone 7).</p>';
+
+    const fpCard = fp
+      ? `<p>Core: <strong>${esc(fp.wpVersion ?? '?')}</strong>
+   ${fp.wpLatest ? `· latest <strong>${esc(fp.wpLatest)}</strong>` : ''}
+   ${fp.coreOutdated ? '<span class="warn">outdated</span>' : fp.wpVersion ? '<span class="muted">up to date</span>' : ''}
+   · source: ${esc(fp.wpVersionSource ?? 'hidden')}</p>
+<p class="muted small">Scanned ${esc(fp.scannedAt.slice(0, 16).replace('T', ' '))} UTC. Versions are <em>detected</em> from public pages and are approximate.</p>`
+      : '<p class="muted">Not scanned yet — the hourly fingerprint job or "Scan now" fills this in.</p>';
+
+    const compRows = comps
+      .map((comp) => {
+        const cls = comp.outdated ? 'class="row-outdated"' : '';
+        const statusLabel =
+          comp.status === 'premium_unknown' ? '<span class="muted">not on wp.org (premium/unknown)</span>'
+          : comp.status === 'version_hidden' ? '<span class="muted">version hidden</span>'
+          : comp.outdated ? '<span class="warn">outdated</span>'
+          : '<span class="muted">up to date</span>';
+        return `<tr ${cls}>
+  <td>${comp.type === 'plugin' ? 'plugin' : 'theme'}</td>
+  <td><code>${esc(comp.slug)}</code></td>
+  <td>${esc(comp.detectedVersion ?? '?')}${comp.versionSource === 'asset_ver' ? ' <span class="muted small" title="From asset ?ver= — may differ from the real version">(asset)</span>' : ''}</td>
+  <td>${esc(comp.latestVersion ?? '—')}</td>
+  <td>${statusLabel}</td>
+</tr>`;
+      })
+      .join('');
+
+    return layout(c, {
+      title: s.name,
+      user: u,
+      active: 'sites',
+      charts: true,
+      content: `
 ${flash}${err}
-<h1>${esc(s.name)} ${s.verifiedAt ? `<span class="badge ${s.currentStatus}">${s.currentStatus}</span>` : '<span class="badge unknown">unverified</span>'}</h1>
-<p class="muted">${esc(s.url)} · added ${esc(s.createdAt.slice(0, 10))}</p>
+<h1>${esc(s.name)} <span class="badge ${s.currentStatus}">${s.currentStatus}</span></h1>
+<p class="muted"><a href="${esc(s.url)}" target="_blank" rel="noopener nofollow">${esc(s.url)}</a> · added ${esc(s.createdAt.slice(0, 10))}
+ · verified via ${esc(s.verificationMethod ?? '?')} ${esc((s.verifiedAt ?? '').slice(0, 10))}</p>
 
-${verifySection}
+<div class="grid2">
+  <section class="card">
+    <h2>Response time — last 24 h</h2>
+    <div id="chart24" class="chart"></div>
+    <p class="muted small">Uptime 24 h: <strong>${uptime24 === null ? '—' : uptime24 + '%'}</strong></p>
+  </section>
+  <section class="card">
+    <h2>Response time — last 7 d</h2>
+    <div id="chart7" class="chart"></div>
+    <p class="muted small">Uptime 7 d: <strong>${uptime7 === null ? '—' : uptime7 + '%'}</strong></p>
+  </section>
+</div>
+
+<section class="card">
+  <h2>PageSpeed history</h2>
+  ${psHistory.length ? '<div id="chartps" class="chart"></div>' : '<p class="muted">No PageSpeed results yet.</p>'}
+</section>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Security (SSL)</h2>
+    ${sslCard}
+  </section>
+  <section class="card">
+    <h2>WordPress (detected)</h2>
+    ${fpCard}
+    <form method="POST" action="/sites/${s.id}/scan" class="inline-form">
+      <button class="btn" type="submit">Scan now</button>
+      <span class="muted small">rate-limited: 1 scan / 5 min</span>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Detected plugins &amp; themes</h2>
+  <p class="muted small">Detected from public pages — approximate. "not on wp.org" means we cannot check its latest version (premium or custom).</p>
+  <table class="table">
+    <thead><tr><th>Type</th><th>Slug</th><th>Detected</th><th>Latest</th><th>Status</th></tr></thead>
+    <tbody>${compRows || '<tr><td colspan="5" class="muted">Nothing detected yet.</td></tr>'}</tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Last checks</h2>
+  <table class="table">
+    <thead><tr><th>When (UTC)</th><th>Result</th><th>HTTP</th><th>Time</th><th>Error</th></tr></thead>
+    <tbody>${last20 || '<tr><td colspan="5" class="muted">No checks in the last 24 h.</td></tr>'}</tbody>
+  </table>
+</section>
 
 <section class="card">
   <h2>Settings</h2>
   <form method="POST" action="/sites/${s.id}/edit" class="stack">
     <label>Name <input name="name" value="${esc(s.name)}" maxlength="100"></label>
     <label>Notes <textarea name="notes" rows="2" maxlength="2000">${esc(s.notes ?? '')}</textarea></label>
-    <div>
-      <button class="btn primary" type="submit">Save</button>
-      <a class="btn" href="/sites">Back to list</a>
-    </div>
+    <div><button class="btn primary" type="submit">Save</button> <a class="btn" href="/sites">Back to list</a></div>
   </form>
 </section>
 
@@ -212,10 +345,55 @@ ${verifySection}
         onsubmit="return confirm('Delete ${esc(s.name)} and all its history?');">
     <button class="btn danger" type="submit">Delete site</button>
   </form>
-</section>`,
-      });
-    })();
+</section>
+
+<script>
+function lineChart(el, data, color, unit) {
+  if (!window.uPlot || !data.length) return;
+  const xs = data.map((d) => d[0]);
+  const ys = data.map((d) => d[1]);
+  new uPlot({
+    width: el.clientWidth || 600, height: 180,
+    scales: { x: { time: true } },
+    series: [{ label: 'time' }, { label: unit, stroke: color, width: 1.5, points: { show: false } }],
+    axes: [{}, {}],
+    cursor: { drag: { x: true } },
+  }, [xs, ys], el);
+}
+lineChart(document.getElementById('chart24'), ${chartData24}, '#4da3ff', 'ms');
+lineChart(document.getElementById('chart7'), ${chartData7}, '#4da3ff', 'ms');
+const psEl = document.getElementById('chartps');
+if (psEl) lineChart(psEl, ${psData}, '#7ee787', 'score');
+</script>`,
+    });
   });
+
+  // ------------------------------------------------------------- scan now
+  app.post(
+    '/sites/:id/scan',
+    requireCsrf(),
+    rateLimit({ prefix: 'scan:min', limit: 1, windowMs: 5 * 60 * 1000 }, (c) => c.req.param('id')),
+    async (c) => {
+      const u = user(c);
+      const id = parseSiteId(c.req.param('id'));
+      if (!id) return c.notFound();
+      const db = makeDb(c.env);
+      const s = await findSiteForUser(db, u.id, id);
+      if (!s) return c.notFound();
+      if (!s.verifiedAt) return c.redirect(`/sites/${id}?err=` + encodeURIComponent('Verify ownership before scanning.'), 302);
+
+      const budget = makeBudget(45);
+      const home = await fetchPublic(s.url, { method: 'GET', maxBytes: 1_500_000, timeoutMs: 10_000 });
+      if (!home.ok || !home.body) {
+        return c.redirect(`/sites/${id}?err=` + encodeURIComponent('Could not fetch the homepage (' + (home.error ?? 'error') + ').'), 302);
+      }
+      const scan = await scanSite(db, { id: s.id, url: s.url }, budget, home.body);
+      if (!scan) return c.redirect(`/sites/${id}?err=` + encodeURIComponent('Scan failed.'), 302);
+      await writeScan(db, s.id, scan, nowIso());
+      await db.update(sites).set({ lastScannedAt: nowIso() }).where(eq(sites.id, s.id)).run();
+      return c.redirect(`/sites/${id}?scanned=1`, 302);
+    },
+  );
 
   // ------------------------------------------------------------- edit
   app.post('/sites/:id/edit', requireCsrf(), async (c) => {

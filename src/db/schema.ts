@@ -79,6 +79,7 @@ export const sites = sqliteTable(
     lastCheckedAt: text('last_checked_at'),
     lastResponseMs: integer('last_response_ms'),
     statusChangedAt: text('status_changed_at'),
+    lastScannedAt: text('last_scanned_at'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({ uq: uniqueIndex('uq_sites_owner_url').on(t.ownerId, t.url), ownerIdx: index('idx_sites_owner').on(t.ownerId), statusIdx: index('idx_sites_status').on(t.currentStatus) }),

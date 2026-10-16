@@ -8,11 +8,15 @@ export function esc(s: string): string {
 /** Shared HTML shell (header nav + footer with abuse contact). */
 export function layout(
   c: Context,
-  opts: { title: string; content: string; user?: UserRow; active?: string; htmx?: boolean },
+  opts: { title: string; content: string; user?: UserRow; active?: string; htmx?: boolean; charts?: boolean },
 ): Response {
   const { title, content, user, active } = opts;
   const htmxTag = opts.htmx
     ? '<script src="https://unpkg.com/htmx.org@1.9.12" defer></script>'
+    : '';
+  const chartTag = opts.charts
+    ? '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.min.css">' +
+      '<script src="https://cdn.jsdelivr.net/npm/uplot@1.6.31/dist/uPlot.iife.min.js"></script>'
     : '';
   const nav = user
     ? `<nav class="nav">
@@ -31,6 +35,7 @@ export function layout(
 <title>${esc(title)} — WPMonitor</title>
 <link rel="stylesheet" href="/styles.css">
 ${htmxTag}
+${chartTag}
 </head>
 <body>
 <header class="topbar">

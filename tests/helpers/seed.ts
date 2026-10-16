@@ -7,8 +7,10 @@ export function applySchema(db: D1DatabaseStub): void {
   db.exec('PRAGMA foreign_keys = ON;');
   const fs = require('node:fs');
   const path = require('node:path');
-  const sql = fs.readFileSync(path.join(__dirname, '..', '..', 'migrations', '0001_initial.sql'), 'utf8');
-  db.exec(sql);
+  const dir = path.join(__dirname, '..', '..', 'migrations');
+  for (const f of fs.readdirSync(dir).filter((x: string) => x.endsWith('.sql')).sort()) {
+    db.exec(fs.readFileSync(path.join(dir, f), 'utf8'));
+  }
 }
 export interface TestEnv {
   DB: D1Database;
