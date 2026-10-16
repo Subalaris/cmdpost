@@ -41,10 +41,10 @@ export function authRoutes() {
     const next = c.req.query('next') ?? '';
     const googleEnabled = !!cfg.googleClientId && !!cfg.googleClientSecret;
     return c.html(/* html */ `
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in — WPMonitor</title><link rel="stylesheet" href="/styles.css"></head>
-<body>
-<header class="topbar"><div class="brand">WPMonitor</div><nav><a href="/privacy">Privacy</a></nav></header>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — cmdPost</title><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;650;700;750;800&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"></head>
+<body class="public-shell">
+<header class="topbar"><a class="brand" href="/dashboard">cmdPost<span>·</span></a><nav><a href="/privacy">Privacy</a></nav></header>
 <main class="container narrow card sign-in-card">
   <h1>Sign in or request access</h1>
   <p class="muted">Passwordless sign-in: we email you a one-time magic link (valid 15 minutes).</p>
@@ -59,7 +59,7 @@ export function authRoutes() {
   ${googleEnabled ? `<p class="or">or</p><a class="btn" href="/auth/google">Sign in with Google</a>` : ''}
   <p class="muted small">By continuing you agree to our <a href="/privacy">privacy policy</a>.</p>
 </main>
-<footer class="footer">WPMonitor — monitoring only, never writes to your sites. · <a href="mailto:abuse@wpmonitor.example">abuse contact</a></footer>
+<footer class="footer">cmdPost — monitoring only, never writes to your sites. · <a href="mailto:abuse@wpmonitor.example">abuse contact</a></footer>
 </body></html>`);
   });
 
@@ -201,9 +201,9 @@ async function verifyTurnstileOrSkip(c: Context): Promise<boolean> {
 }
 
 function loginSuccessPage() {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Check your email — WPMonitor</title>
-<link rel="stylesheet" href="/styles.css"></head><body>
-<header class="topbar"><div class="brand">WPMonitor</div></header>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Check your email — cmdPost</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;650;700;750;800&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"></head><body class="public-shell">
+<header class="topbar"><a class="brand" href="/dashboard">cmdPost<span>·</span></a></header>
 <main class="container narrow card">
   <h1>Check your email</h1>
   <p>We've sent you a sign-in link. It expires in 15 minutes and works once.</p>
@@ -213,12 +213,12 @@ function loginSuccessPage() {
 
 function loginErrorPage(msg: string) {
   const esc = msg.replace(/[&<>]/g, (s) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[s]!);
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Sign in — WPMonitor</title>
-<link rel="stylesheet" href="/styles.css"></head><body>
-<header class="topbar"><div class="brand">WPMonitor</div></header>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in — cmdPost</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;650;700;750;800&display=swap" rel="stylesheet"><link rel="stylesheet" href="/styles.css"></head><body class="public-shell">
+<header class="topbar"><a class="brand" href="/dashboard">cmdPost<span>·</span></a></header>
 <main class="container narrow card">
   <h1>Sign in</h1>
-  <p class="error">${esc}</p>
+  <p class="error-text">${esc}</p>
   <p><a href="/login">Try again</a></p>
 </main></body></html>`;
 }

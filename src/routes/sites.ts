@@ -101,7 +101,7 @@ export function sitesRoutes() {
         content: `
 ${flash}${err}
 <h1>My sites <span class="muted" style="font-weight:400">(${sites.length}/${cfg.maxSitesPerUser})</span></h1>
-<section class="card">
+<section class="card" id="add-site">
   <h2>Add a site</h2>
   <p class="muted small">Paste one URL per line to add several at once. Nothing is checked until you verify ownership.</p>
   <form method="POST" action="/sites/add" class="stack">

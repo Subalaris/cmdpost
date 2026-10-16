@@ -1,173 +1,106 @@
 import { Hono } from 'hono';
 import { makeDb } from '../db/client';
-import { querySitesForUser, type SiteFilter, type SiteSort } from '../db/repos/sites';
+import { dashboardSummaryForUser, querySitesForUser, type SiteFilter, type SiteSort, type DashboardRow } from '../db/repos/sites';
 import { layout, esc } from '../views/layout';
+import { icon } from '../views/icons';
 import type { Env } from '../env';
 import type { UserRow } from '../db/repos/users';
 
-function user(c: { get(k: string): unknown }): UserRow {
-  return c.get('user') as UserRow;
-}
-
-const PER_PAGE = 25;
-const SORTS: SiteSort[] = ['name', 'status', 'pagespeed', 'load', 'updates'];
+const PER_PAGE = 9;
+const SORTS: Array<[SiteSort, string]> = [
+  ['name', 'Name: A–Z'], ['status', 'Status'], ['pagespeed', 'Performance: low first'],
+  ['load', 'Load time'], ['updates', 'Most updates'],
+];
 const FILTERS: Array<[SiteFilter, string]> = [
-  ['all', 'All'],
-  ['down', 'Down'],
-  ['updates', 'Has updates'],
-  ['ssl', 'SSL issues'],
+  ['all', 'All websites'], ['up', 'Online'], ['down', 'Needs attention'], ['updates', 'Has updates'], ['ssl', 'SSL issues'],
 ];
 
-function parseSort(v: string | undefined): SiteSort {
-  return (SORTS as string[]).includes(v ?? '') ? (v as SiteSort) : 'name';
-}
-function parseFilter(v: string | undefined): SiteFilter {
-  return FILTERS.some(([f]) => f === v) ? (v as SiteFilter) : 'all';
-}
-function parsePage(v: string | undefined): number {
-  const n = Number(v ?? '1');
-  return Number.isInteger(n) && n > 0 ? n : 1;
-}
-
-function statusBadge(r: { currentStatus: string; verifiedAt: string | null }, id: number): string {
-  if (!r.verifiedAt) return `<a class="badge unknown" href="/sites/${id}" title="Not verified yet — monitoring has not started">unverified</a>`;
-  const title = r.currentStatus === 'down' ? 'Down after 2 consecutive failures' : r.currentStatus === 'up' ? 'Up' : 'Not checked yet';
-  return `<span class="badge ${r.currentStatus}" title="${title}">${r.currentStatus}</span>`;
+function statusBadge(r: DashboardRow): string {
+  if (!r.verifiedAt) return `<a class="status" href="/sites/${r.id}" title="Verify ownership to start monitoring"><span class="dot pending"></span>Unverified</a>`;
+  const label = r.currentStatus === 'up' ? 'Up' : r.currentStatus === 'down' ? 'Down' : 'Pending';
+  return `<span class="status" title="${r.currentStatus === 'down' ? 'Down after 2 consecutive failures' : label}"><span class="dot ${r.currentStatus}"></span>${label}</span>`;
 }
 
 function scoreCell(v: number | null): string {
-  if (v === null || v === undefined) return '<span class="muted" title="No PageSpeed result yet">n/a</span>';
-  const cls = v >= 90 ? 'good' : v >= 50 ? 'warn' : 'bad';
-  return `<span class="score ${cls}">${v}</span><span class="muted small">/100</span>`;
+  if (v == null) return '<span class="muted" title="No PageSpeed result yet">—</span>';
+  return `${icon('gauge')}<span class="score ${v < 50 ? 'bad' : v < 90 ? 'warn' : ''}">${v}</span><small>/100</small>`;
 }
 
-function loadCell(ms: number | null): string {
-  if (ms === null || ms === undefined) return '<span class="muted">—</span>';
-  return `${(ms / 1000).toFixed(2)} s`;
-}
-
-function secCell(n: number): string {
-  if (!n) return '<span class="muted" title="No SSL problems">&#128274; 0</span>';
-  return `<span class="bad" title="SSL problem">&#128274; ${n}</span>`;
-}
-
-function wpCell(n: number | null): string {
-  if (n === null || n === undefined) return '<span class="muted" title="Not scanned yet">&#9432; ?</span>';
-  if (n === 0) return '<span class="muted" title="No outdated components detected">&#9432; 0</span>';
-  return `<span class="warn" title="${n} outdated component(s) detected (approximate)">&#9432; ${n}</span>`;
-}
-
-/** Link that swaps the dashboard panel via htmx (falls back to a normal GET). */
-function hxLink(label: string, qs: string, active: boolean): string {
-  return `<a href="${esc(qs)}" hx-get="${esc(qs)}&partial=1" hx-target="#site-panel" hx-swap="outerHTML" class="${active ? 'active' : ''}">${label}</a>`;
-}
-
-/** Query-string builder that keeps current params and overrides some. */
-function makeQs(params: URLSearchParams): (over: Record<string, string>) => string {
-  return (over) => {
-    const p = new URLSearchParams(params);
-    for (const [k, v] of Object.entries(over)) p.set(k, v);
-    const s = p.toString();
-    return `/dashboard${s ? '?' + s : ''}`;
-  };
+/** Normal links remain usable when JavaScript or the htmx CDN is unavailable. */
+function panelLink(label: string, url: string, attrs = ''): string {
+  return `<a href="${esc(url)}" hx-get="${esc(url)}&partial=1" hx-target="#site-panel" hx-swap="outerHTML" hx-push-url="${esc(url)}" ${attrs}>${label}</a>`;
 }
 
 export function dashboardRoutes() {
   const app = new Hono<{ Bindings: Env }>();
 
-  const render = async (c: any, full: boolean) => {
-    const u = user(c);
-    const db = makeDb(c.env);
-    const params = new URL(c.req.url).searchParams;
-    const sort = parseSort(params.get('sort') ?? undefined);
-    const filter = parseFilter(params.get('filter') ?? undefined);
-    const search = (params.get('q') ?? '').trim().slice(0, 200);
-    const page = parsePage(params.get('page') ?? undefined);
-    const qs = makeQs(params);
-
-    const { rows, total } = await querySitesForUser(db, u.id, { sort, filter, search, page, perPage: PER_PAGE });
-    const pages = Math.max(1, Math.ceil(total / PER_PAGE));
-
-    const trs = rows
-      .map(
-        (r) => `<tr>
-  <td><a href="/sites/${r.id}">${esc(r.name)}</a><div class="muted small">${esc(new URL(r.url).hostname)}</div></td>
-  <td>${statusBadge(r, r.id)}</td>
-  <td>${scoreCell(r.pagespeedScore)}</td>
-  <td>${loadCell(r.lastResponseMs)}</td>
-  <td>${secCell(r.sslProblems)}</td>
-  <td>${wpCell(r.updatesCount)}</td>
-  <td><a class="muted" href="${esc(r.url)}" target="_blank" rel="noopener nofollow" title="Open site">&#8599;</a></td>
-</tr>`,
-      )
-      .join('');
-
-    const pager =
-      pages > 1
-        ? `<div class="pager">
-    ${page > 1 ? hxLink('&larr; prev', qs({ page: String(page - 1) }), false) : ''}
-    <span class="muted">page ${page} / ${pages}</span>
-    ${page < pages ? hxLink('next &rarr;', qs({ page: String(page + 1) }), false) : ''}
-  </div>`
-        : '';
-
-    const tbody =
-      trs ||
-      `<tr><td colspan="7" class="muted">${total === 0 ? (search || filter !== 'all' ? 'No sites match.' : 'No sites yet — add one to get started.') : ''}</td></tr>`;
-
-    // The swappable panel: table + pager. Auto-refresh polls it every 30 s.
-    const panel = `<div id="site-panel" hx-get="${esc(qs({ partial: '1' }))}" hx-trigger="every 30s" hx-swap="outerHTML">
-<section class="card">
-  <table class="table" id="site-table">
-    <thead><tr><th>Site</th><th>Status</th><th>PageSpeed</th><th>Load</th><th>Security</th><th>WP updates</th><th></th></tr></thead>
-    <tbody>${tbody}</tbody>
-  </table>
-  ${pager}
-</section>
-</div>`;
-
-    if (!full) return c.html(panel);
-
-    const filterTabs = FILTERS.map(([f, label]) => hxLink(label, qs({ filter: f, page: '1' }), filter === f)).join(' ');
-    const sortLinks = [
-      ['Name', 'name'],
-      ['Status', 'status'],
-      ['PageSpeed', 'pagespeed'],
-      ['Load time', 'load'],
-      ['Updates', 'updates'],
-    ]
-      .map(([label, key]) => hxLink(label + (sort === key ? ' ▾' : ''), qs({ sort: key, page: '1' }), sort === key))
-      .join(' · ');
-
-    return layout(c, {
-      title: 'Dashboard',
-      user: u,
-      active: 'dashboard',
-      htmx: true,
-      content: `
-<h1>You are currently monitoring ${total} website${total === 1 ? '' : 's'}</h1>
-<div class="toolbar">
-  <a class="btn primary" href="/sites">Manage sites</a>
-  <form class="inline-form search-form" action="/dashboard" method="GET"
-        hx-get="/dashboard" hx-target="#site-panel" hx-swap="outerHTML"
-        hx-trigger="keyup changed delay:400ms from:#q, submit">
-    <input type="search" id="q" name="q" placeholder="Search name or URL…" value="${esc(search)}">
-    <input type="hidden" name="sort" value="${esc(sort)}">
-    <input type="hidden" name="filter" value="${esc(filter)}">
-    <input type="hidden" name="partial" value="1">
-  </form>
-  <div class="tabs">${filterTabs}</div>
-</div>
-<div class="sortbar muted small">Sort: ${sortLinks}</div>
-${panel}
-<p class="muted small">Status is checked every 5 minutes; this view refreshes every 30 seconds. PageSpeed, security and WP-update columns fill in with later milestones.</p>`,
-    });
-  };
-
   app.get('/dashboard', async (c) => {
-    const partial = c.req.query('partial') === '1';
-    return render(c, !partial);
+    const u = c.get('user' as never) as UserRow;
+    const db = makeDb(c.env);
+    const sort = SORTS.find(([key]) => key === c.req.query('sort'))?.[0] ?? 'name';
+    const filter = FILTERS.find(([key]) => key === c.req.query('filter'))?.[0] ?? 'all';
+    const search = (c.req.query('q') ?? '').trim().slice(0, 200);
+    const requestedPage = Number(c.req.query('page') ?? '1');
+    let page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+    const summary = await dashboardSummaryForUser(db, u.id);
+    let result = await querySitesForUser(db, u.id, { sort, filter, search, page, perPage: PER_PAGE });
+    const { total } = result;
+    const pages = Math.max(1, Math.ceil(total / PER_PAGE));
+    if (page > pages) {
+      page = pages;
+      result = await querySitesForUser(db, u.id, { sort, filter, search, page, perPage: PER_PAGE });
+    }
+    const qs = (over: Record<string, string> = {}) => {
+      const p = new URLSearchParams({ sort, filter, q: search, page: String(page), ...over });
+      return `/dashboard?${p.toString()}`;
+    };
+    const optionList = (options: Array<[string, string]>, value: string) => options.map(([key, label]) =>
+      `<option value="${key}"${key === value ? ' selected' : ''}>${label}</option>`).join('');
+    const tab = (key: SiteFilter, label: string, count: number) => panelLink(
+      `${label}<span>${count}</span>`, qs({ filter: key, page: '1' }),
+      `class="tab ${filter === key ? 'active' : ''}"${filter === key ? ' aria-current="page"' : ''}`,
+    );
+    const pagerButton = (label: string, symbol: string, target: number, disabled: boolean, reverse = false) => {
+      const contents = `<span${reverse ? ' class="reverse"' : ''}>${icon(symbol)}</span>`;
+      return disabled ? `<button disabled aria-label="${label}">${contents}</button>`
+        : panelLink(contents, qs({ page: String(target) }), `aria-label="${label}"`);
+    };
+    const rows = result.rows.map((r) => `<tr>
+<td><div class="website-cell"><span class="favicon color-${r.id % 6}">${esc(r.name.slice(0, 1).toUpperCase())}</span><div><a class="site-name" href="/sites/${r.id}">${esc(r.name)}</a><span class="client-name">${esc(new URL(r.url).hostname)}</span></div></div></td>
+<td>${statusBadge(r)}</td>
+<td><span class="metric">${scoreCell(r.pagespeedScore)}</span></td>
+<td><span class="metric">${icon('clock')}${r.lastResponseMs == null ? '<span class="muted">—</span>' : `${(r.lastResponseMs / 1000).toFixed(1)}<small>s</small>`}</span></td>
+<td><span class="metric ${r.sslProblems ? 'bad' : ''}" title="${r.sslProblems == null ? 'Not scanned yet' : r.sslProblems ? 'SSL problem' : 'No SSL problems'}">${icon('lock')}${r.sslProblems ?? '—'}</span></td>
+<td><span class="metric" title="${r.updatesCount == null ? 'Not scanned yet' : 'Outdated components detected (approximate)'}"><span class="wp">W</span><span class="updates">${r.updatesCount ?? '—'}</span></span></td>
+<td><a class="open-site" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer nofollow" aria-label="Open ${esc(r.name)} in a new tab">${icon('external')}</a></td>
+</tr>`).join('');
+    // Controls and results swap together so polling and navigation retain current filters.
+    const panel = `<section id="site-panel" hx-get="${esc(qs({ partial: '1' }))}" hx-trigger="every 30s [!document.querySelector('#website-filters:focus-within')]" hx-swap="outerHTML">
+<div class="overview" aria-label="Workspace overview">
+  <div class="stat"><div class="stat-top">${icon('globe')}Total websites</div><div class="stat-line"><strong>${summary.total}</strong><small>in your workspace</small></div></div>
+  <div class="stat"><div class="stat-top">${icon('pulse')}Online now</div><div class="stat-line"><strong class="good">${summary.online}</strong><small>running smoothly</small></div></div>
+  <div class="stat"><div class="stat-top">${icon('shield')}Needs attention</div><div class="stat-line"><strong class="bad">${String(summary.down).padStart(2, '0')}</strong><small>currently offline</small></div></div>
+  <div class="stat"><div class="stat-top">${icon('gauge')}Avg. performance</div><div class="stat-line"><strong>${summary.averageScore == null ? '—' : Math.round(summary.averageScore)}<span class="score-unit">/100</span></strong></div></div>
+</div>
+<form id="website-filters" action="/dashboard" method="GET" hx-get="/dashboard" hx-target="#site-panel" hx-swap="outerHTML" hx-push-url="true" hx-trigger="submit, input changed delay:400ms from:#q, change from:select" hx-sync="this:replace">
+  <div class="tabbar"><nav class="tabs" aria-label="Website status">${tab('all', 'All websites', summary.total)}${tab('up', 'Online', summary.online)}${tab('down', 'Needs attention', summary.down)}</nav>
+  <div class="search">${icon('search')}<input type="search" id="q" name="q" aria-label="Search websites" placeholder="Search websites…" value="${esc(search)}" maxlength="200"></div></div>
+  <div class="toolbar"><div class="selects"><div class="select-wrap">${icon('sort')}<select name="sort" aria-label="Sort websites">${optionList(SORTS, sort)}</select></div><div class="select-wrap">${icon('filter')}<select name="filter" aria-label="Filter websites">${optionList(FILTERS, filter)}</select></div><button class="btn small apply-filters" type="submit">Apply</button></div><span class="results" role="status">${total} website${total === 1 ? '' : 's'} ${search || filter !== 'all' ? 'found' : 'in total'}</span></div>
+</form>
+<div class="table-scroll"><table class="table website-table" id="site-table"><thead><tr><th scope="col">Website</th><th scope="col">Status</th><th scope="col">Performance</th><th scope="col">Load time</th><th scope="col">Security</th><th scope="col">Updates</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table></div>
+${rows ? '' : `<div class="empty"><span class="empty-icon">${icon('globe')}</span><strong>${summary.total === 0 ? 'A home for all your websites.' : 'No websites found'}</strong><p>${summary.total === 0 ? 'Add your first website to start keeping an eye on its health.' : 'Try another search or change your filters.'}</p>${summary.total === 0 ? '<a class="btn primary" href="/sites#add-site">Add a website</a>' : panelLink('Clear filters', '/dashboard?filter=all', 'class="btn"')}</div>`}
+<div class="pagination"><span>${total ? `Showing ${(page - 1) * PER_PAGE + 1}–${Math.min(page * PER_PAGE, total)} of ${total} websites` : 'Showing 0 websites'}</span><nav class="pages" aria-label="Website pages">${pagerButton('First page', 'double', 1, page === 1, true)}${pagerButton('Previous page', 'chevron', page - 1, page === 1, true)}<span class="page-label"><b>${page}</b> of ${pages}</span>${pagerButton('Next page', 'chevron', page + 1, page === pages)}${pagerButton('Last page', 'double', pages, page === pages)}</nav></div>
+<p class="refresh-note">${icon('clock')}Status checks every 5 minutes · Dashboard refreshes every 30 seconds</p>
+</section>`;
+    if (c.req.query('partial') === '1' || c.req.header('HX-Request') === 'true') {
+      // Keep partial=1 out of browser history so refresh always renders the full app.
+      c.header('HX-Push-Url', qs());
+      return c.html(panel);
+    }
+    return layout(c, {
+      title: 'Websites', user: u, active: 'dashboard', htmx: true,
+      content: `<div class="intro"><div><h1>Websites</h1><p class="subtitle">Your websites, in good hands.<br><strong>${summary.total} website${summary.total === 1 ? '' : 's'}</strong>. One calm place to keep everything in view.</p></div><a class="btn primary" href="/sites#add-site">${icon('plus')}Add a website</a></div>${panel}`,
+    });
   });
-
   return app;
 }

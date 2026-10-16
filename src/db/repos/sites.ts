@@ -382,7 +382,7 @@ export async function listComponents(db: Db, siteId: number) {
 
 // ------------------------------------------------------------- dashboard
 
-export type SiteFilter = 'all' | 'down' | 'updates' | 'ssl';
+export type SiteFilter = 'all' | 'up' | 'down' | 'updates' | 'ssl';
 export type SiteSort = 'name' | 'status' | 'pagespeed' | 'load' | 'updates';
 
 export interface DashboardRow {
@@ -411,6 +411,17 @@ const SSL_PROBLEMS = sql`(SELECT CASE WHEN ss.state IS NULL OR ss.state = 'ok' T
 const UPDATES_COUNT = sql`(SELECT COUNT(*) FROM site_components sc WHERE sc.site_id = sites.id AND sc.outdated = 1)`;
 const HAS_FINGERPRINT = sql`EXISTS (SELECT 1 FROM wp_fingerprints wf WHERE wf.site_id = sites.id)`;
 
+/** Workspace-wide metrics, always scoped to the signed-in owner. */
+export async function dashboardSummaryForUser(db: Db, userId: number) {
+  const row = await db.select({
+    total: count(),
+    online: sql<number>`COALESCE(SUM(CASE WHEN ${sites.currentStatus} = 'up' AND ${sites.verifiedAt} IS NOT NULL THEN 1 ELSE 0 END), 0)`,
+    down: sql<number>`COALESCE(SUM(CASE WHEN ${sites.currentStatus} = 'down' THEN 1 ELSE 0 END), 0)`,
+    averageScore: sql<number | null>`AVG(${LATEST_PS})`,
+  }).from(sites).where(eq(sites.ownerId, userId)).get();
+  return row ?? { total: 0, online: 0, down: 0, averageScore: null };
+}
+
 /**
  * Server-side sort/filter/search/pagination for the dashboard table.
  * ISOLATION: userId is mandatory and always in the WHERE clause.
@@ -423,6 +434,7 @@ export async function querySitesForUser(
   const conds = [eq(sites.ownerId, userId)];
   if (opts.search) conds.push(sql`(${sites.name} LIKE ${'%' + opts.search + '%'} OR ${sites.url} LIKE ${'%' + opts.search + '%'})`);
   if (opts.filter === 'down') conds.push(eq(sites.currentStatus, 'down'));
+  if (opts.filter === 'up') conds.push(and(eq(sites.currentStatus, 'up'), isNotNull(sites.verifiedAt))!);
   if (opts.filter === 'updates') conds.push(sql`${UPDATES_COUNT} > 0`);
   if (opts.filter === 'ssl') conds.push(sql`${SSL_PROBLEMS} > 0`);
   const where = and(...conds);
