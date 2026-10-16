@@ -1,4 +1,4 @@
-import { eq, sql, count } from 'drizzle-orm';
+import { eq, sql, count, inArray } from 'drizzle-orm';
 import type { Db } from '../client';
 import {
   users,
@@ -166,4 +166,28 @@ export async function countUserSites(db: Db, userId: number): Promise<number> {
 export async function isUserApproved(db: Db, userId: number): Promise<boolean> {
   const u = await findUserById(db, userId);
   return u?.status === 'approved';
+}
+
+// ------------------------------------------------------------- job queries
+
+/**
+ * INTERNAL (alert job only): alert channels for the given user ids.
+ * Returns alertEmail (falling back to the login email) and webhookUrl.
+ * Alerts are delivered ONLY to these per-owner targets.
+ */
+export async function getAlertTargets(
+  db: Db,
+  userIds: number[],
+): Promise<Map<number, { alertEmail: string; webhookUrl: string | null }>> {
+  const out = new Map<number, { alertEmail: string; webhookUrl: string | null }>();
+  if (userIds.length === 0) return out;
+  const rows = await db
+    .select({ id: users.id, email: users.email, alertEmail: users.alertEmail, webhookUrl: users.webhookUrl })
+    .from(users)
+    .where(inArray(users.id, userIds))
+    .all();
+  for (const r of rows) {
+    out.set(r.id, { alertEmail: (r.alertEmail || r.email).toLowerCase(), webhookUrl: r.webhookUrl });
+  }
+  return out;
 }

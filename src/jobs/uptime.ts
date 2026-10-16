@@ -13,6 +13,7 @@
  */
 import { makeDb, nowIso, type Db } from '../db/client';
 import { selectUptimeBatch, writeCheckResults, type JobSite } from '../db/repos/sites';
+import { sendTransitionAlerts } from './alerts';
 import { applyCheck } from '../lib/state-machine';
 import { validatePublicUrl, MONITOR_UA } from '../lib/ssrf';
 import type { Env } from '../env';
@@ -107,7 +108,13 @@ export interface UptimeJobReport {
   checked: number;
   skipped: number;
   subrequests: number;
-  transitions: Array<{ site: JobSite; transition: 'up-to-down' | 'down-to-up'; from: string; to: string }>;
+  transitions: Array<{
+    site: JobSite;
+    transition: 'up-to-down' | 'down-to-up';
+    from: string;
+    to: string;
+    statusChangedAt: string | null;
+  }>;
 }
 
 /** Run one uptime slice. Called from the scheduled handler every 5 min. */
@@ -144,7 +151,13 @@ export async function runUptimeJob(env: Env, db: Db = makeDb(env)): Promise<Upti
       res.ok,
     );
     if (next.transition) {
-      report.transitions.push({ site: s, transition: next.transition, from: s.currentStatus, to: next.status });
+      report.transitions.push({
+        site: s,
+        transition: next.transition,
+        from: s.currentStatus,
+        to: next.status,
+        statusChangedAt: s.statusChangedAt, // when the site entered the OLD state → downtime basis
+      });
     }
     writes.push({
       siteId: s.id,
@@ -166,8 +179,32 @@ export async function runUptimeJob(env: Env, db: Db = makeDb(env)): Promise<Upti
   if (writes.length > 0) await writeCheckResults(db, writes);
   report.subrequests = budget.n;
   if (report.transitions.length > 0) {
-    // Milestone 4: hand report.transitions to the alert job (per-owner email/webhook).
+    // Hand transitions to the alert job (per-owner email/webhook, milestone 4).
     console.log(`[uptime] transitions: ${report.transitions.map((t) => `${t.site.url} ${t.transition}`).join(', ')}`);
+    const bySite = new Map(writes.map((w) => [w.siteId, w]));
+    await sendTransitionAlerts(
+      env,
+      db,
+      report.transitions.map((t) => {
+        const w = bySite.get(t.site.id);
+        const detail =
+          t.transition === 'up-to-down'
+            ? `HTTP ${w?.statusCode ?? '?'}${w?.error ? ` (${w.error})` : ''}`
+            : undefined;
+        return {
+          site: {
+            id: t.site.id,
+            url: t.site.url,
+            name: t.site.name,
+            ownerId: t.site.ownerId,
+            statusChangedAt: t.statusChangedAt,
+          },
+          kind: t.transition,
+          detail,
+        };
+      }),
+      budget,
+    );
   }
   console.log(`[uptime] selected=${report.selected} checked=${report.checked} skipped=${report.skipped} subrequests=${report.subrequests}`);
   return report;

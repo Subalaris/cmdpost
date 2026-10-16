@@ -177,9 +177,11 @@ export async function markVerified(
 export interface JobSite {
   id: number;
   url: string;
+  name: string;
   ownerId: number;
   currentStatus: 'up' | 'down' | 'unknown';
   consecutiveFailures: number;
+  statusChangedAt: string | null;
 }
 
 export async function selectUptimeBatch(db: Db, limit: number, minIntervalMs: number): Promise<JobSite[]> {
@@ -188,9 +190,11 @@ export async function selectUptimeBatch(db: Db, limit: number, minIntervalMs: nu
     .select({
       id: sites.id,
       url: sites.url,
+      name: sites.name,
       ownerId: sites.ownerId,
       currentStatus: sites.currentStatus,
       consecutiveFailures: sites.consecutiveFailures,
+      statusChangedAt: sites.statusChangedAt,
     })
     .from(sites)
     .innerJoin(users, eq(sites.ownerId, users.id))
